@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS stories (
   summary TEXT,
   category TEXT NOT NULL DEFAULT '其他',
   source_note TEXT,
+  raw_content TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -26,6 +27,31 @@ CREATE TABLE IF NOT EXISTS paragraphs (
   content TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(story_id, paragraph_no)
+);
+
+CREATE TABLE IF NOT EXISTS story_images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  story_id INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  slot_no INTEGER NOT NULL,
+  original_name TEXT NOT NULL,
+  stored_name TEXT NOT NULL,
+  storage_path TEXT NOT NULL,
+  mime_type TEXT,
+  bytes INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(story_id, slot_no)
+);
+
+CREATE TABLE IF NOT EXISTS content_blocks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  story_id INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  block_no INTEGER NOT NULL,
+  block_type TEXT NOT NULL,
+  paragraph_id INTEGER REFERENCES paragraphs(id) ON DELETE CASCADE,
+  image_id INTEGER REFERENCES story_images(id) ON DELETE CASCADE,
+  caption TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(story_id, block_no)
 );
 
 CREATE TABLE IF NOT EXISTS tags (
