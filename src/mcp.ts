@@ -3,14 +3,28 @@ import * as z from "zod/v4";
 import fs from "node:fs";
 import type { Archive } from "./db.js";
 
-const result = (value: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-  structuredContent: value as Record<string, unknown>
-});
+const REDACT_KEYS = new Set(["raw_content", "abs_path", "storage_path", "stored_name"]);
+function sanitize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !REDACT_KEYS.has(key))
+      .map(([key, val]) => [key, sanitize(val)]));
+  }
+  return value;
+}
+
+const result = (value: unknown) => {
+  const safe = sanitize(value);
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
+    structuredContent: safe as Record<string, unknown>
+  };
+};
 
 export function buildMcp(archive: Archive) {
   const server = new McpServer(
-    { name: "story-archive", version: "0.3.0" },
+    { name: "story-archive", version: "0.3.1" },
     {
       capabilities: { tools: {} },
       instructions:
@@ -22,7 +36,10 @@ export function buildMcp(archive: Archive) {
 4. 有图片的故事会以 image block 暴露，image_url 指向故事中的插图。
 5. 只有真的产生了有价值的新分类时才 add_tags，不要机械打标签。
 6. 段评应像真实阅读者的边看边评，只在有具体反应时 comment_paragraph，不要每段都留言。
-7. 不要修改或假装修改正文；正文由用户在网页管理端上传和编辑。`
+7. 不要修改或假装修改正文；正文由用户在网页管理端上传和编辑。
+8. 若用户要求“闭眼阅读 / 首次体验 / 不剧透 / 代入推理”，严禁调用 search_passages、search_stories、get_story_document 或 list_story_images 探查后文；只能按用户明确授权的范围调用 read_story_blocks / read_paragraphs。不要自行扩大 end_block / end_paragraph。
+9. get_story_outline 默认不返回任何正文 preview。只有用户明确说明“已读/已解锁到第 N 段”时，才可把 preview_until_paragraph 设为 N；绝不可为了方便自行填更大的值。
+10. MCP 对外返回会强制剔除 raw_content、服务器文件路径等内部字段。若工具说明与实际返回冲突，以“不泄露未授权正文”为最高优先级。`
     }
   );
 
@@ -37,7 +54,7 @@ export function buildMcp(archive: Archive) {
 
   server.registerTool("search_passages", {
     title: "搜索正文段落",
-    description: "默认检索入口。全文搜索具体段落，返回 story_id、paragraph_id、段号和命中片段；适合按事件、角色、台词、情节回忆。",
+    description: "默认检索入口。全文搜索具体段落，返回 story_id、paragraph_id、段号和命中片段；适合回忆已知内容。闭眼/未读故事禁止使用，以免剧透。",
     inputSchema: z.object({
       query: z.string().min(1).describe("FTS 查询。普通关键词可直接写；多个词默认更严格，可按需要减少关键词。"),
       tags: z.array(z.string()).optional().describe("可选标签过滤，AND 关系"),
@@ -48,7 +65,7 @@ export function buildMcp(archive: Archive) {
 
   server.registerTool("search_stories", {
     title: "搜索标题与摘要",
-    description: "只搜故事标题和摘要；当只记得作品名、局名、概述时使用。",
+    description: "只搜故事标题和摘要；当只记得作品名、局名、概述时使用。闭眼/未读故事禁止用来探查后续。",
     inputSchema: z.object({
       query: z.string().min(1),
       tags: z.array(z.string()).optional(),
@@ -70,19 +87,22 @@ export function buildMcp(archive: Archive) {
 
   server.registerTool("get_story_outline", {
     title: "读取故事目录",
-    description: "返回故事元数据、标签、段落数量、block 数量和每段短预览，不返回整篇正文。适合决定要读哪些位置。",
-    inputSchema: z.object({ story_id: z.number().int().positive() })
-  }, async x => result(archive.storyOutline(x.story_id)));
+    description: "返回安全元数据、标签、段落数量、block 数量和段落编号；默认所有正文 preview 都为 null，不返回 raw_content。只有用户明确授权“已解锁到第 N 段”时，才传 preview_until_paragraph=N。",
+    inputSchema: z.object({
+      story_id: z.number().int().positive(),
+      preview_until_paragraph: z.number().int().min(0).optional().describe("仅显示 1..N 段的短 preview。默认 0=全部隐藏；闭眼模式不得自行提高。")
+    })
+  }, async x => result(archive.storyOutline(x.story_id, x.preview_until_paragraph ?? 0)));
 
   server.registerTool("get_story_document", {
     title: "读取故事文档结构",
-    description: "返回整篇故事的元数据、图片列表和按顺序排列的内容块预览。图文混排故事优先用它看结构。",
+    description: "返回安全元数据、图片列表和 block 结构，不返回 raw_content，也不返回正文 preview。用于已知内容的结构检查；闭眼/未读故事禁止调用。",
     inputSchema: z.object({ story_id: z.number().int().positive() })
   }, async x => result(archive.getStoryDocument(x.story_id)));
 
   server.registerTool("read_story_blocks", {
     title: "读取连续内容块",
-    description: "按 block 顺序读取故事的一小段内容。text block 返回正文，image block 返回图片元数据、说明和 image_url。一次最多 60 块。",
+    description: "按 block 顺序只读取指定范围。text block 返回该范围正文，image block 返回图片元数据、说明和 image_url；不会夹带整篇 raw_content。一次最多 60 块。闭眼模式只能读取用户明确授权的范围。",
     inputSchema: z.object({
       story_id: z.number().int().positive(),
       start_block: z.number().int().positive(),
@@ -93,7 +113,7 @@ export function buildMcp(archive: Archive) {
 
   server.registerTool("read_paragraphs", {
     title: "读取连续段落",
-    description: "只读取文本段落（不包含图片块）。一次最多 40 段。",
+    description: "只读取指定文本段落（不包含图片块），不会夹带整篇 raw_content。一次最多 40 段。闭眼模式只能读取用户明确授权的范围。",
     inputSchema: z.object({
       story_id: z.number().int().positive(),
       start_paragraph: z.number().int().positive(),
@@ -104,13 +124,13 @@ export function buildMcp(archive: Archive) {
 
   server.registerTool("list_story_images", {
     title: "列出故事图片",
-    description: "列出某篇故事的所有已上传图片、slot 编号和 image_url。",
+    description: "列出某篇故事的所有已上传图片、slot 编号和 image_url。闭眼/未读故事禁止用它提前查看后续图片。",
     inputSchema: z.object({ story_id: z.number().int().positive() })
   }, async x => result(archive.listStoryImages(x.story_id)));
 
   server.registerTool("read_story_image", {
     title: "读取故事图片",
-    description: "读取档案中的一张原始图片。用于真正查看/识别图片内容，而不是只看 image_url。",
+    description: "读取档案中的一张原始图片。用于真正查看/识别已授权范围内的图片内容，而不是只看 image_url。",
     inputSchema: z.object({ image_id: z.number().int().positive() })
   }, async x => {
     const image = archive.getImageById(x.image_id);
