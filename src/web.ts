@@ -10,16 +10,76 @@ const esc = (x: unknown) => String(x ?? "")
   .replaceAll('"', "&quot;");
 
 function asFiles(files: Express.Multer.File[] | undefined) {
-  return (files ?? []).map(file => ({
-    originalName: file.originalname,
-    mimeType: file.mimetype,
-    buffer: file.buffer
-  }));
+  return (files ?? []).filter(Boolean).map((file, index) => ({
+    originalName: String(file?.originalname || `image-${index + 1}`),
+    mimeType: String(file?.mimetype || "application/octet-stream"),
+    buffer: Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([])
+  })).filter(file => file.buffer.length > 0);
 }
 
 function fieldFiles(req: express.Request, name: string) {
   const fields = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
   return fields?.[name] ?? [];
+}
+
+function pickerScript(textareaId: string, inputId: string, listId: string, startSlot = 1) {
+  return `<script>
+(() => {
+  const textarea = document.getElementById(${JSON.stringify(textareaId)});
+  const input = document.getElementById(${JSON.stringify(inputId)});
+  const list = document.getElementById(${JSON.stringify(listId)});
+  if (!textarea || !input || !list) return;
+  const startSlot = ${startSlot};
+
+  function insertAtCursor(text) {
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? start;
+    const before = textarea.value.slice(0, start);
+    const after = textarea.value.slice(end);
+    const prefix = before && !before.endsWith("\\n") ? "\\n" : "";
+    const suffix = after && !after.startsWith("\\n") ? "\\n" : "";
+    const inserted = prefix + text + suffix;
+    textarea.value = before + inserted + after;
+    const pos = start + inserted.length;
+    textarea.focus();
+    textarea.setSelectionRange(pos, pos);
+  }
+
+  function render() {
+    const files = Array.from(input.files || []);
+    if (!files.length) {
+      list.innerHTML = '<span class="meta">还没有选择图片。</span>';
+      return;
+    }
+    list.innerHTML = files.map((file, i) => {
+      const slot = startSlot + i;
+      const size = Math.max(1, Math.round(file.size / 1024));
+      return '<div class="card" style="margin:8px 0;padding:10px">'
+        + '<b>image:' + slot + '</b> · ' + escHtml(file.name) + ' <span class="meta">(' + size + ' KB)</span>'
+        + '<div class="toolbar" style="margin-top:8px">'
+        + '<button type="button" data-insert="' + slot + '">插入正文</button>'
+        + '<button type="button" data-caption="' + slot + '">插入并写说明</button>'
+        + '</div></div>';
+    }).join('');
+
+    list.querySelectorAll('[data-insert]').forEach(btn => btn.addEventListener('click', () => {
+      insertAtCursor('[[image:' + btn.dataset.insert + ']]');
+    }));
+    list.querySelectorAll('[data-caption]').forEach(btn => btn.addEventListener('click', () => {
+      const caption = window.prompt('图片说明（留空也可以）', '') ?? '';
+      const slot = btn.dataset.caption;
+      insertAtCursor(caption.trim() ? '[[image:' + slot + '|' + caption.trim() + ']]' : '[[image:' + slot + ']]');
+    }));
+  }
+
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c] || c));
+  }
+
+  input.addEventListener('change', render);
+  render();
+})();
+</script>`;
 }
 
 export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: string) {
@@ -71,7 +131,7 @@ export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: s
       res.type(image.mime_type || "application/octet-stream");
       res.sendFile(image.abs_path);
     } catch (e: any) {
-      res.status(404).send(e.message);
+      res.status(404).send(esc(e?.message || e));
     }
   });
 
@@ -99,7 +159,8 @@ export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: s
           </div>`).join("") +
       `<form method="post" action="/story/${s.id}/delete" onsubmit="return confirm('确定删除整篇？')"><button class=danger>删除整篇</button></form>`));
     } catch (e: any) {
-      res.status(404).send(layout("不存在", `<p>${esc(e.message)}</p>`));
+      console.error("[GET story]", e?.stack || e);
+      res.status(404).send(layout("不存在", `<p>${esc(e?.message || e)}</p>`));
     }
   });
 
@@ -110,42 +171,43 @@ export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: s
     <label>分类<input name="category" placeholder="AI狼人杀 / 世界盒子 / 小说共读 / 其他"></label>
     <label>标签（逗号分隔）<input name="tags" placeholder="芋圆, 女巫, 盲毒"></label>
     <label>来源备注<input name="source_note" placeholder="例如：2026-08-22 第二局复盘"></label>
-    <label>正文 / 图文源码<textarea name="content" rows="20"></textarea></label>
+    <label>正文 / 图文源码<textarea id="upload-content" name="content" rows="20"></textarea></label>
     <label>或者上传 .txt / .md 文本文件<input type="file" name="file" accept=".txt,.md,text/plain,text/markdown"></label>
-    <label>上传图片（顺序对应 image:1, image:2...）<input type="file" name="images" multiple accept="image/*"></label>
-    <pre class="hint">插图写法示例：
-[[image:1]]
-[[image:2|这张图是角色表]]
-
-说明：
-1. 你上传的第1张图对应 [[image:1]]。
-2. 第2张图对应 [[image:2]]，以此类推。
-3. 纯图片文档也可以，正文留空即可。</pre>
-    <button>上传</button></form>`)));
+    <label>上传图片<input id="upload-images" type="file" name="images" multiple accept="image/*"></label>
+    <div id="upload-image-list" class="card"><span class="meta">还没有选择图片。</span></div>
+    <pre class="hint">选择图片后，会显示 image:1、image:2……并出现“插入正文”按钮。
+你把光标放到正文需要的位置，再点对应图片的“插入正文”，系统会自动写入 [[image:N]]。
+也可以点“插入并写说明”，自动生成 [[image:N|说明]]。</pre>
+    <button>上传</button></form>
+    ${pickerScript("upload-content", "upload-images", "upload-image-list", 1)}`)));
 
   app.post("/upload", upload.fields([{name:"file",maxCount:1},{name:"images",maxCount:30}]), (req, res) => {
     try {
       const textFile = fieldFiles(req, "file")[0];
-      const pasted = String(req.body.content || "");
+      const pasted = String(req.body?.content || "");
       const rawContent = pasted.trim() ? pasted : (textFile ? textFile.buffer.toString("utf8") : "");
+      const imageFiles = asFiles(fieldFiles(req, "images"));
+      console.log(`[POST /upload] title=${JSON.stringify(String(req.body?.title || ""))} images=${imageFiles.length} content=${rawContent.length}`);
       const out = archive.uploadStory({
-        title: String(req.body.title || ""),
-        summary: String(req.body.summary || ""),
-        category: String(req.body.category || "其他"),
-        sourceNote: String(req.body.source_note || ""),
-        tags: String(req.body.tags || "").split(/[,，]/).map((x: string) => x.trim()).filter(Boolean),
-        rawContent,
-        images: asFiles(fieldFiles(req, "images"))
+        title: String(req.body?.title || ""),
+        summary: String(req.body?.summary || ""),
+        category: String(req.body?.category || "其他"),
+        sourceNote: String(req.body?.source_note || ""),
+        tags: String(req.body?.tags || "").split(/[,，]/).map((x: string) => String(x || "").trim()).filter(Boolean),
+        rawContent: String(rawContent || ""),
+        images: imageFiles
       });
       res.redirect(`/story/${out.story_id}`);
     } catch (e: any) {
-      res.status(400).send(layout("上传失败", `<p>${esc(e.message)}</p><p><a href="/upload">返回</a></p>`));
+      console.error("[POST /upload]", e?.stack || e);
+      res.status(400).send(layout("上传失败", `<p>${esc(e?.message || e)}</p><p><a href="/upload">返回</a></p>`));
     }
   });
 
   app.get("/story/:id/edit", (req, res) => {
     try {
       const s: any = archive.getStoryForEdit(Number(req.params.id));
+      const nextSlot = Math.max(0, ...(s.images || []).map((img: any) => Number(img.slot_no) || 0)) + 1;
       res.send(layout(`编辑 ${s.title}`, `
         <h1>编辑：${esc(s.title)}</h1>
         <form method="post" action="/story/${s.id}/edit" enctype="multipart/form-data">
@@ -154,39 +216,39 @@ export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: s
           <label>分类<input name="category" value="${esc(s.category || "")}"></label>
           <label>标签（逗号分隔）<input name="tags" value="${esc((s.tags || []).join(", "))}"></label>
           <label>来源备注<input name="source_note" value="${esc(s.source_note || "")}"></label>
-          <label>正文 / 图文源码<textarea name="content" rows="22">${esc(s.raw_content || "")}</textarea></label>
-          <label>新增图片（会追加成新的 image:N 槽位）<input type="file" name="images" multiple accept="image/*"></label>
-          <pre class="hint">插图写法：[[image:1]] 或 [[image:2|图片说明]]
-
-当前可用图片槽位：
-${(s.images || []).map((img: any) => `image:${img.slot_no} → ${img.original_name}`).join("\n") || "（暂无已上传图片）"}
-
-编辑说明：
-1. 新上传图片会自动继续编号。
-2. 你可以在正文任意位置插入或移动 [[image:N]]。
-3. 暂不单独删除旧图片；如果正文里不引用，它就不会显示在正文中。</pre>
+          <label>正文 / 图文源码<textarea id="edit-content" name="content" rows="22">${esc(s.raw_content || "")}</textarea></label>
+          <label>新增图片<input id="edit-images" type="file" name="images" multiple accept="image/*"></label>
+          <div class="card"><b>已有图片</b><br>${(s.images || []).map((img: any) => `image:${img.slot_no} → ${esc(img.original_name)}`).join("<br>") || "（暂无）"}</div>
+          <div id="edit-image-list" class="card"><span class="meta">还没有选择新图片。</span></div>
+          <pre class="hint">新图片会从 image:${nextSlot} 开始继续编号。
+把光标放到正文需要的位置，再点“插入正文”即可自动插入占位符。</pre>
           <button>保存修改</button>
-        </form>`));
+        </form>
+        ${pickerScript("edit-content", "edit-images", "edit-image-list", nextSlot)}`));
     } catch (e: any) {
-      res.status(404).send(layout("不存在", `<p>${esc(e.message)}</p>`));
+      console.error("[GET edit]", e?.stack || e);
+      res.status(404).send(layout("不存在", `<p>${esc(e?.message || e)}</p>`));
     }
   });
 
   app.post("/story/:id/edit", upload.array("images", 30), (req, res) => {
     try {
+      const imageFiles = asFiles(req.files as Express.Multer.File[] | undefined);
+      console.log(`[POST /story/${req.params.id}/edit] images=${imageFiles.length}`);
       archive.updateStory({
         storyId: Number(req.params.id),
-        title: String(req.body.title || ""),
-        summary: String(req.body.summary || ""),
-        category: String(req.body.category || "其他"),
-        sourceNote: String(req.body.source_note || ""),
-        tags: String(req.body.tags || "").split(/[,，]/).map((x: string) => x.trim()).filter(Boolean),
-        rawContent: String(req.body.content || ""),
-        images: asFiles(req.files as Express.Multer.File[] | undefined)
+        title: String(req.body?.title || ""),
+        summary: String(req.body?.summary || ""),
+        category: String(req.body?.category || "其他"),
+        sourceNote: String(req.body?.source_note || ""),
+        tags: String(req.body?.tags || "").split(/[,，]/).map((x: string) => String(x || "").trim()).filter(Boolean),
+        rawContent: String(req.body?.content || ""),
+        images: imageFiles
       });
       res.redirect(`/story/${Number(req.params.id)}`);
     } catch (e: any) {
-      res.status(400).send(layout("保存失败", `<p>${esc(e.message)}</p><p><a href="/story/${Number(req.params.id)}/edit">返回</a></p>`));
+      console.error(`[POST /story/${req.params.id}/edit]`, e?.stack || e);
+      res.status(400).send(layout("保存失败", `<p>${esc(e?.message || e)}</p><p><a href="/story/${Number(req.params.id)}/edit">返回</a></p>`));
     }
   });
 
