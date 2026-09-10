@@ -5,6 +5,7 @@ import { createArchive } from "./db.js";
 import { buildMcp } from "./mcp.js";
 import { buildWeb } from "./web.js";
 import { buildSegments } from "./segments.js";
+import { segmentLinks } from "./segment-links.js";
 
 const PORT=Number(process.env.PORT||8787);
 const DB=process.env.ARCHIVE_DB||"./data/archive.sqlite";
@@ -19,7 +20,7 @@ const nodeMcp=toNodeHandler(mcpHandler);
 
 const app=express();
 
-app.get("/health",(_req,res)=>res.json({ok:true,name:"story-archive-mcp",version:"0.3.2"}));
+app.get("/health",(_req,res)=>res.json({ok:true,name:"story-archive-mcp",version:"0.3.3"}));
 
 app.use("/mcp",(req,res,next)=>{
   if(!MCP_API_KEY) return next();
@@ -29,6 +30,7 @@ app.use("/mcp",(req,res,next)=>{
 });
 app.all("/mcp",(req,res)=>void nodeMcp(req,res));
 
+app.use(segmentLinks());
 app.use("/",buildSegments(archive,ADMIN_USER,ADMIN_PASSWORD));
 app.use("/",buildWeb(archive,ADMIN_USER,ADMIN_PASSWORD));
 
