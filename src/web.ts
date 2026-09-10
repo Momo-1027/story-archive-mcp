@@ -17,6 +17,11 @@ function asFiles(files: Express.Multer.File[] | undefined) {
   }));
 }
 
+function fieldFiles(req: express.Request, name: string) {
+  const fields = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+  return fields?.[name] ?? [];
+}
+
 export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: string) {
   const app = express();
   app.use(express.urlencoded({ extended: true, limit: "12mb" }));
@@ -106,6 +111,7 @@ export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: s
     <label>标签（逗号分隔）<input name="tags" placeholder="芋圆, 女巫, 盲毒"></label>
     <label>来源备注<input name="source_note" placeholder="例如：2026-08-22 第二局复盘"></label>
     <label>正文 / 图文源码<textarea name="content" rows="20"></textarea></label>
+    <label>或者上传 .txt / .md 文本文件<input type="file" name="file" accept=".txt,.md,text/plain,text/markdown"></label>
     <label>上传图片（顺序对应 image:1, image:2...）<input type="file" name="images" multiple accept="image/*"></label>
     <pre class="hint">插图写法示例：
 [[image:1]]
@@ -117,16 +123,19 @@ export function buildWeb(archive: Archive, adminUser?: string, adminPassword?: s
 3. 纯图片文档也可以，正文留空即可。</pre>
     <button>上传</button></form>`)));
 
-  app.post("/upload", upload.array("images", 30), (req, res) => {
+  app.post("/upload", upload.fields([{name:"file",maxCount:1},{name:"images",maxCount:30}]), (req, res) => {
     try {
+      const textFile = fieldFiles(req, "file")[0];
+      const pasted = String(req.body.content || "");
+      const rawContent = pasted.trim() ? pasted : (textFile ? textFile.buffer.toString("utf8") : "");
       const out = archive.uploadStory({
         title: String(req.body.title || ""),
         summary: String(req.body.summary || ""),
         category: String(req.body.category || "其他"),
         sourceNote: String(req.body.source_note || ""),
         tags: String(req.body.tags || "").split(/[,，]/).map((x: string) => x.trim()).filter(Boolean),
-        rawContent: String(req.body.content || ""),
-        images: asFiles(req.files as Express.Multer.File[] | undefined)
+        rawContent,
+        images: asFiles(fieldFiles(req, "images"))
       });
       res.redirect(`/story/${out.story_id}`);
     } catch (e: any) {
