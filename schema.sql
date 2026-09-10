@@ -86,17 +86,24 @@ CREATE TABLE IF NOT EXISTS activities (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS paragraph_fts USING fts5(
+-- Full-text indexes are derived cache, not source-of-truth data.
+-- Recreate them on startup so a damaged legacy FTS index can never block archive writes.
+DROP TABLE IF EXISTS paragraph_fts;
+DROP TABLE IF EXISTS story_fts;
+
+CREATE VIRTUAL TABLE paragraph_fts USING fts5(
   content,
-  content='paragraphs',
-  content_rowid='id',
   tokenize='unicode61'
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS story_fts USING fts5(
+CREATE VIRTUAL TABLE story_fts USING fts5(
   title,
   summary,
-  content='stories',
-  content_rowid='id',
   tokenize='unicode61'
 );
+
+INSERT INTO paragraph_fts(rowid, content)
+SELECT id, content FROM paragraphs;
+
+INSERT INTO story_fts(rowid, title, summary)
+SELECT id, title, COALESCE(summary, '') FROM stories;
